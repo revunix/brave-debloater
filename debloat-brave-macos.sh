@@ -31,9 +31,14 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 BROWSER_BUNDLE_ID="com.brave.Browser"
-USER_PLIST="${HOME}/Library/Preferences/${BROWSER_BUNDLE_ID}.plist"
+if [[ -n "${SUDO_USER:-}" ]]; then
+    REAL_HOME="$(eval echo ~${SUDO_USER})"
+else
+    REAL_HOME="${HOME}"
+fi
+USER_PLIST="${REAL_HOME}/Library/Preferences/${BROWSER_BUNDLE_ID}.plist"
 MANAGED_PLIST="/Library/Managed Preferences/${BROWSER_BUNDLE_ID}.plist"
-BACKUP_DIR="${HOME}/.brave-debloat-backups"
+BACKUP_DIR="${REAL_HOME}/.brave-debloat-backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Policy definitions with CORRECT macOS types.
@@ -137,10 +142,9 @@ cleanup_user_prefs() {
     print_success "Cleaned up user preferences."
 }
 
-ensure_managed_plist() {
-    if [[ ! -f "${MANAGED_PLIST}" ]]; then
-        mkdir -p "/Library/Managed Preferences"
-        cat > "${MANAGED_PLIST}" << 'EOF'
+create_empty_plist() {
+    local target="$1"
+    cat > "${target}" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -148,23 +152,20 @@ ensure_managed_plist() {
 </dict>
 </plist>
 EOF
-        chmod 644 "${MANAGED_PLIST}"
-        chown root:wheel "${MANAGED_PLIST}"
+    chmod 644 "${target}"
+    chown root:wheel "${target}"
+}
+
+ensure_managed_plist() {
+    if [[ ! -f "${MANAGED_PLIST}" ]]; then
+        mkdir -p "/Library/Managed Preferences"
+        create_empty_plist "${MANAGED_PLIST}"
         print_info "Created managed preferences plist."
     else
         if ! plutil -lint "${MANAGED_PLIST}" &>/dev/null; then
             print_warn "Existing managed plist is invalid. Backing up and recreating."
             mv "${MANAGED_PLIST}" "${MANAGED_PLIST}.bak.$(date +%s)"
-            cat > "${MANAGED_PLIST}" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-</dict>
-</plist>
-EOF
-            chmod 644 "${MANAGED_PLIST}"
-            chown root:wheel "${MANAGED_PLIST}"
+            create_empty_plist "${MANAGED_PLIST}"
         fi
     fi
 }
@@ -314,15 +315,35 @@ restore_backup() {
     fi
 }
 
+uninstall_policies() {
+    if [[ ! -f "${MANAGED_PLIST}" ]]; then
+        print_info "No managed policies plist found. Nothing to remove."
+        return
+    fi
+    print_warn "This will remove ALL managed policies from Brave."
+    read -rp "Are you sure? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        print_info "Uninstall cancelled."
+        return
+    fi
+    rm -f "${MANAGED_PLIST}"
+    print_success "Removed managed policies plist."
+    cleanup_user_prefs
+    killall cfprefsd 2>/dev/null || true
+    echo ""
+    print_success "All policies removed. Please restart Brave."
+}
+
 show_help() {
     cat << 'EOF'
 Brave Browser Debloater for macOS
 
 Usage:
-  sudo ./debloat-brave-macos.sh            Apply debloat policies
-  sudo ./debloat-brave-macos.sh --dry-run  Preview what would change (no modifications)
-  sudo ./debloat-brave-macos.sh --restore  Restore from a previous backup
-  ./debloat-brave-macos.sh --help          Show this help message
+  sudo ./debloat-brave-macos.sh              Apply debloat policies
+  sudo ./debloat-brave-macos.sh --dry-run    Preview what would change (no modifications)
+  sudo ./debloat-brave-macos.sh --restore    Restore from a previous backup
+  sudo ./debloat-brave-macos.sh --uninstall  Remove all managed policies
+  ./debloat-brave-macos.sh --help            Show this help message
 
 This script disables Brave's non-core features by applying macOS managed
 policies with the CORRECT data types via PlistBuddy.
@@ -332,12 +353,15 @@ CRITICAL: Brave boolean policies MUST be written to:
 Writing them via `defaults write` to the user plist with -bool causes
 Brave to crash on startup. This script uses the proper managed path.
 
+Note: --restore and --uninstall both require sudo because the managed
+policy file is owned by root.
+
 Features disabled:
-  Brave News, Rewards, Speedreader, Telemetry, Talk, Tor, VPN,
-  Wayback Machine, Web Discovery Project
+  Brave News, Rewards, Wallet/Web3, Speedreader, Telemetry, Talk, Tor,
+  VPN, Wayback Machine, Web Discovery Project
 
 Features NOT disabled (caused crashes in v147+):
-  Leo AI Chat, Brave Wallet, Sync
+  Leo AI Chat, Sync
 
 You must close Brave before running this script.
 EOF
@@ -348,6 +372,11 @@ main() {
         --restore)
             check_sudo
             restore_backup
+            exit 0
+            ;;
+        --uninstall)
+            check_sudo
+            uninstall_policies
             exit 0
             ;;
         --dry-run)
