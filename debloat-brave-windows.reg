@@ -1,0 +1,52 @@
+Windows Registry Editor Version 5.00
+
+; Brave Browser Debloater for Windows
+; Disables non-core Brave features to mimic Brave Origin
+;
+; Features disabled:
+;   - Leo AI Chat
+;   - Brave News
+;   - Brave Rewards & Ads
+;   - Speedreader
+;   - Telemetry (P3A, crash logs, daily usage ping)
+;   - Brave Talk
+;   - Tor private windows
+;   - Brave VPN
+;   - Brave Wallet & Web3
+;   - Wayback Machine integration
+;   - Web Discovery Project
+;
+; Usage:
+;   1. Close Brave completely
+;   2. Double-click this .reg file
+;   3. Click "Yes" on UAC and confirmation prompts
+;   4. Restart Brave and visit brave://policy to verify
+;
+; To undo: Change values from 1 to 0 (or 0 to 1 for *Enabled keys)
+;          or delete the specific value names under the key below.
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\BraveSoftware\Brave]
+
+; --- Brave-Specific Feature Disables ---
+; 1 = Disabled for "Disabled" suffix keys
+"BraveRewardsDisabled"=dword:00000001
+"BraveWalletDisabled"=dword:00000001
+"BraveVPNDisabled"=dword:00000001
+"BraveNewsDisabled"=dword:00000001
+"BraveTalkDisabled"=dword:00000001
+"TorDisabled"=dword:00000001
+"SyncDisabled"=dword:00000001
+
+; --- Brave-Specific Feature Disables (0 = Disabled for "Enabled" suffix keys) ---
+"BraveAIChatEnabled"=dword:00000000
+"BraveSpeedreaderEnabled"=dword:00000000
+"BraveWaybackMachineEnabled"=dword:00000000
+"BraveP3AEnabled"=dword:00000000
+"BraveStatsPingEnabled"=dword:00000000
+"BraveWebDiscoveryEnabled"=dword:00000000
+
+; --- General Telemetry & Bloat ---
+"MetricsReportingEnabled"=dword:00000000
+"PromotionsEnabled"=dword:00000000
+"BackgroundModeEnabled"=dword:00000000
+"BrowserSignin"=dword:00000000

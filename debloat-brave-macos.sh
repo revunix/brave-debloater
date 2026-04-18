@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+#
+# Brave Browser Debloater for macOS
+# Disables non-core Brave features to mimic Brave Origin
+#
+# WARNING: Some policies (BraveAIChatEnabled, SyncDisabled,
+# BraveWalletDisabled, PromotionsEnabled, BackgroundModeEnabled,
+# BrowserSignin) cause Brave v147+ to crash with SIGTRAP even when
+# written to the managed plist with correct types. They are excluded.
+#
+# Leo AI can be disabled manually at brave://settings/leo instead.
+#
+# CRITICAL: On macOS, Brave boolean policies MUST be written to the
+# managed preferences location (/Library/Managed Preferences/) using
+# proper boolean types. Writing them to the user preferences plist
+# via `defaults write -bool` causes Brave to crash on startup.
+#
+# Usage:
+#   chmod +x debloat-brave-macos.sh
+#   sudo ./debloat-brave-macos.sh           # Apply debloat
+#   sudo ./debloat-brave-macos.sh --dry-run # Preview what would change
+#   sudo ./debloat-brave-macos.sh --restore # Restore from a previous backup
+#
+
+set -uo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+BROWSER_BUNDLE_ID="com.brave.Browser"
+USER_PLIST="${HOME}/Library/Preferences/${BROWSER_BUNDLE_ID}.plist"
+MANAGED_PLIST="/Library/Managed Preferences/${BROWSER_BUNDLE_ID}.plist"
+BACKUP_DIR="${HOME}/.brave-debloat-backups"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+# Policy definitions with CORRECT macOS types.
+# Boolean policies are written to /Library/Managed Preferences/ via PlistBuddy.
+# Integer policies are also written there.
+#
+# NOTE: Some policies cause Brave to crash with SIGTRAP/CHECK failures even
+# when written to the managed plist with correct types. These have been removed:
+#   BraveAIChatEnabled:bool:false  - Leo AI is deeply integrated; disabling crashes
+#   SyncDisabled:bool:true          - Breaks browser state restoration on launch
+#   BraveWalletDisabled:bool:true   - May trigger CHECK assertion in v147+
+#   PromotionsEnabled:bool:false     - May trigger assertion failures
+#   BackgroundModeEnabled:bool:false - May cause startup instability
+#   BrowserSignin:int:0             - Affects core sign-in infrastructure
+declare -a POLICIES=(
+    # --- Boolean policies (feature toggles) ---
+    "BraveRewardsDisabled:bool:true"
+    "BraveVPNDisabled:bool:true"
+    "BraveWalletDisabled:bool:true"
+    "BraveNewsDisabled:bool:true"
+    "BraveTalkDisabled:bool:true"
+    "TorDisabled:bool:true"
+    "BraveWaybackMachineEnabled:bool:false"
+    "BraveP3AEnabled:bool:false"
+    "BraveStatsPingEnabled:bool:false"
+    "BraveWebDiscoveryEnabled:bool:false"
+    "BraveSpeedreaderEnabled:bool:false"
+    "MetricsReportingEnabled:bool:false"
+)
+
+print_header() {
+    echo -e "${CYAN}"
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║          Brave Browser Debloater for macOS                   ║"
+    echo "║     Disables bloat to mimic Brave Origin experience          ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+print_success() { echo -e "${GREEN}✓${NC} $1"; }
+print_warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
+print_error() { echo -e "${RED}✗${NC} $1"; }
+print_info()  { echo -e "${CYAN}ℹ${NC} $1"; }
+
+check_sudo() {
+    if [[ $EUID -ne 0 ]]; then
+        print_error "This script requires administrator privileges (sudo)."
+        echo ""
+        echo "   macOS managed policies MUST be written to:"
+        echo "   ${MANAGED_PLIST}"
+        echo ""
+        echo "   Please run with sudo:"
+        echo "     sudo ./debloat-brave-macos.sh"
+        echo ""
+        exit 1
+    fi
+}
+
+check_brave_installed() {
+    if ! osascript -e 'id of app "Brave Browser"' &>/dev/null; then
+        print_error "Brave Browser does not appear to be installed."
+        echo "   Please install Brave from https://brave.com and run it at least once."
+        exit 1
+    fi
+    print_success "Brave Browser is installed."
+}
+
+warn_close_brave() {
+    if pgrep -x "Brave Browser" &>/dev/null; then
+        print_warn "Brave Browser is currently running."
+        echo ""
+        read -rp "   Please close Brave completely and press [Enter] to continue..."
+        if pgrep -x "Brave Browser" &>/dev/null; then
+            print_error "Brave is still running. Please close it and try again."
+            exit 1
+        fi
+    fi
+    print_success "Brave Browser is not running."
+}
+
+backup_existing() {
+    mkdir -p "${BACKUP_DIR}/${TIMESTAMP}"
+    if [[ -f "${MANAGED_PLIST}" ]]; then
+        cp "${MANAGED_PLIST}" "${BACKUP_DIR}/${TIMESTAMP}/managed_com.brave.Browser.plist"
+        print_success "Backed up managed Brave plist."
+    fi
+    if [[ -f "${USER_PLIST}" ]]; then
+        cp "${USER_PLIST}" "${BACKUP_DIR}/${TIMESTAMP}/com.brave.Browser.plist"
+        print_success "Backed up user Brave plist."
+    fi
+    print_info "Backups saved to: ${BACKUP_DIR}/${TIMESTAMP}"
+}
+
+cleanup_user_prefs() {
+    print_info "Cleaning up old policies from user preferences..."
+    local key
+    for entry in "${POLICIES[@]}"; do
+        IFS=':' read -r key _ _ <<< "$entry"
+        defaults delete "${BROWSER_BUNDLE_ID}" "${key}" 2>/dev/null || true
+    done
+    print_success "Cleaned up user preferences."
+}
+
+ensure_managed_plist() {
+    if [[ ! -f "${MANAGED_PLIST}" ]]; then
+        mkdir -p "/Library/Managed Preferences"
+        cat > "${MANAGED_PLIST}" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+</dict>
+</plist>
+EOF
+        chmod 644 "${MANAGED_PLIST}"
+        chown root:wheel "${MANAGED_PLIST}"
+        print_info "Created managed preferences plist."
+    else
+        if ! plutil -lint "${MANAGED_PLIST}" &>/dev/null; then
+            print_warn "Existing managed plist is invalid. Backing up and recreating."
+            mv "${MANAGED_PLIST}" "${MANAGED_PLIST}.bak.$(date +%s)"
+            cat > "${MANAGED_PLIST}" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+</dict>
+</plist>
+EOF
+            chmod 644 "${MANAGED_PLIST}"
+            chown root:wheel "${MANAGED_PLIST}"
+        fi
+    fi
+}
+
+apply_policies() {
+    local dry_run="${1:-false}"
+    if [[ "$dry_run" == "true" ]]; then
+        print_info "[DRY RUN] The following policies would be applied:"
+        echo ""
+        echo "   Target: ${MANAGED_PLIST}"
+        echo ""
+    else
+        print_info "Applying managed policies via PlistBuddy..."
+        echo ""
+        ensure_managed_plist
+    fi
+
+    local key value dtype
+    for entry in "${POLICIES[@]}"; do
+        IFS=':' read -r key dtype value <<< "$entry"
+        if [[ "$dry_run" == "true" ]]; then
+            echo "   Would set: ${key} -> ${value} (${dtype})"
+            continue
+        fi
+
+        # Remove existing key to ensure clean type
+        /usr/libexec/PlistBuddy -c "Delete :${key}" "${MANAGED_PLIST}" 2>/dev/null || true
+
+        # Add with correct type
+        if ! /usr/libexec/PlistBuddy -c "Add :${key} ${dtype} ${value}" "${MANAGED_PLIST}" 2>/dev/null; then
+            print_error "Failed to set ${key} -> ${value} (${dtype})"
+            continue
+        fi
+        print_success "Set ${key} -> ${value} (${dtype})"
+    done
+
+    if [[ "$dry_run" != "true" ]]; then
+        # Ensure permissions are correct
+        chmod 644 "${MANAGED_PLIST}"
+        chown root:wheel "${MANAGED_PLIST}"
+        # Flush preferences cache
+        killall cfprefsd 2>/dev/null || true
+        echo ""
+        print_success "All policies applied."
+    fi
+}
+
+print_summary() {
+    echo ""
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  Debloating complete!${NC}"
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo "The following features have been DISABLED:"
+    echo "  • Brave News"
+    echo "  • Brave Rewards & Ads"
+    echo "  • Brave Wallet & Web3"
+    echo "  • Speedreader"
+    echo "  • Telemetry (P3A, daily usage ping, metrics)"
+    echo "  • Brave Talk"
+    echo "  • Tor private windows"
+    echo "  • Brave VPN"
+    echo "  • Wayback Machine integration"
+    echo "  • Web Discovery Project"
+    echo ""
+    echo -e "${YELLOW}SKIPPED (crash-causing on v147+):${NC}"
+    echo "  • Leo AI Chat (policy crashes Brave)"
+    echo "  • Sync (policy breaks state restoration)"
+    echo ""
+    echo -e "${YELLOW}Tip:${NC} To disable Leo AI without a policy, go to"
+    echo "  brave://settings/leo and turn it off manually."
+    echo ""
+    echo -e "${YELLOW}IMPORTANT:${NC} Please restart Brave Browser for all changes to take effect."
+    echo ""
+    echo "You can verify policies are active by visiting:"
+    echo "  brave://policy"
+    echo ""
+    print_info "To undo these changes, run:"
+    echo "  sudo ./debloat-brave-macos.sh --restore"
+    echo ""
+    echo -e "${YELLOW}Note:${NC} You may see 'Managed by your organization' in Brave's menu."
+    echo "      This is normal and expected when policy values are active."
+    echo ""
+}
+
+restore_backup() {
+    echo ""
+    print_info "Available backups:"
+    if [[ ! -d "${BACKUP_DIR}" ]]; then
+        print_error "No backup directory found."
+        exit 1
+    fi
+    local backups=()
+    while IFS= read -r -d '' dir; do
+        backups+=("$(basename "$dir")")
+    done < <(find "${BACKUP_DIR}" -maxdepth 1 -mindepth 1 -type d -print0 | sort -z)
+    if [[ ${#backups[@]} -eq 0 ]]; then
+        print_error "No backups found."
+        exit 1
+    fi
+    echo ""
+    local i=1
+    for b in "${backups[@]}"; do
+        echo "  ${i}) ${b}"
+        ((i++))
+    done
+    echo ""
+    read -rp "Select a backup to restore (1-${#backups[@]}): " choice
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#backups[@]} )); then
+        print_error "Invalid selection."
+        exit 1
+    fi
+    local selected="${backups[$((choice-1))]}"
+    local restore_path="${BACKUP_DIR}/${selected}"
+    print_warn "This will restore Brave policies from backup: ${selected}"
+    read -rp "Are you sure? [y/N]: " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        local restored=false
+        if [[ -f "${restore_path}/managed_com.brave.Browser.plist" ]]; then
+            mkdir -p "$(dirname "${MANAGED_PLIST}")"
+            cp "${restore_path}/managed_com.brave.Browser.plist" "${MANAGED_PLIST}"
+            chmod 644 "${MANAGED_PLIST}"
+            chown root:wheel "${MANAGED_PLIST}"
+            print_success "Restored managed plist preferences."
+            restored=true
+        else
+            # If no managed backup exists, remove managed plist to clear policies
+            if [[ -f "${MANAGED_PLIST}" ]]; then
+                rm -f "${MANAGED_PLIST}"
+                print_success "Removed managed policies."
+                restored=true
+            fi
+        fi
+        if [[ -f "${restore_path}/com.brave.Browser.plist" ]]; then
+            cp "${restore_path}/com.brave.Browser.plist" "${USER_PLIST}"
+            print_success "Restored user plist preferences."
+            restored=true
+        fi
+        killall cfprefsd 2>/dev/null || true
+        if [[ "$restored" == "true" ]]; then
+            print_success "Restore complete. Please restart Brave."
+        else
+            print_warn "Nothing to restore from this backup."
+        fi
+    else
+        print_info "Restore cancelled."
+    fi
+}
+
+show_help() {
+    cat << 'EOF'
+Brave Browser Debloater for macOS
+
+Usage:
+  sudo ./debloat-brave-macos.sh            Apply debloat policies
+  sudo ./debloat-brave-macos.sh --dry-run  Preview what would change (no modifications)
+  sudo ./debloat-brave-macos.sh --restore  Restore from a previous backup
+  ./debloat-brave-macos.sh --help          Show this help message
+
+This script disables Brave's non-core features by applying macOS managed
+policies with the CORRECT data types via PlistBuddy.
+
+CRITICAL: Brave boolean policies MUST be written to:
+  /Library/Managed Preferences/com.brave.Browser.plist
+Writing them via `defaults write` to the user plist with -bool causes
+Brave to crash on startup. This script uses the proper managed path.
+
+Features disabled:
+  Brave News, Rewards, Speedreader, Telemetry, Talk, Tor, VPN,
+  Wayback Machine, Web Discovery Project
+
+Features NOT disabled (caused crashes in v147+):
+  Leo AI Chat, Brave Wallet, Sync
+
+You must close Brave before running this script.
+EOF
+}
+
+main() {
+    case "${1:-}" in
+        --restore)
+            check_sudo
+            restore_backup
+            exit 0
+            ;;
+        --dry-run)
+            print_header
+            check_sudo
+            check_brave_installed
+            apply_policies true
+            exit 0
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+    esac
+
+    print_header
+    check_sudo
+    check_brave_installed
+    warn_close_brave
+    backup_existing
+    cleanup_user_prefs
+    apply_policies false
+    print_summary
+}
+
+main "$@"
