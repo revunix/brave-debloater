@@ -1,22 +1,28 @@
 # Brave Debloater Scripts
 
-These scripts disable all non-core Brave Browser features to replicate the **Brave Origin** debloated experience — without paying for it.
+These scripts disable non-core Brave Browser features to replicate the **Brave Origin** debloated experience — without paying for it.
 
 ## What Gets Disabled
 
 | Feature | Policy Key |
 |---------|-----------|
-| Leo AI Chat | `BraveAIChatEnabled = 0` |
 | Brave News | `BraveNewsDisabled = 1` |
 | Brave Rewards & Ads | `BraveRewardsDisabled = 1` |
+| Brave Wallet & Web3 | `BraveWalletDisabled = 1` |
 | Speedreader | `BraveSpeedreaderEnabled = 0` |
-| Telemetry (P3A, crash logs, daily ping) | `BraveP3AEnabled = 0`, `BraveStatsPingEnabled = 0` |
+| Telemetry (P3A, daily ping, metrics) | `BraveP3AEnabled = 0`, `BraveStatsPingEnabled = 0`, `MetricsReportingEnabled = 0` |
 | Brave Talk | `BraveTalkDisabled = 1` |
 | Tor Private Windows | `TorDisabled = 1` |
 | Brave VPN | `BraveVPNDisabled = 1` |
-| Brave Wallet & Web3 | `BraveWalletDisabled = 1` |
 | Wayback Machine | `BraveWaybackMachineEnabled = 0` |
 | Web Discovery Project | `BraveWebDiscoveryEnabled = 0` |
+
+### Not Disabled (causes crashes in Brave v147+)
+
+| Feature | Why Skipped |
+|---------|------------|
+| Leo AI Chat | `BraveAIChatEnabled = 0` triggers CHECK assertion crash. Disable manually at `brave://settings/leo` |
+| Sync | `SyncDisabled = 1` breaks browser state restoration on startup |
 
 **What you keep:** Brave Shields (ad/tracker blocking), Brave Search, core browser speed & security updates.
 
@@ -31,21 +37,24 @@ These scripts disable all non-core Brave Browser features to replicate the **Bra
 ### Usage
 
 1. **Close Brave completely** (Cmd+Q)
-2. Open Terminal
-3. Make the script executable and run it:
+2. Open Terminal and run:
 
 ```bash
 cd /path/to/this/folder
 chmod +x debloat-brave-macos.sh
-./debloat-brave-macos.sh
+sudo ./debloat-brave-macos.sh              # Apply debloat
+sudo ./debloat-brave-macos.sh --dry-run    # Preview changes only
+sudo ./debloat-brave-macos.sh --restore    # Restore from backup
+sudo ./debloat-brave-macos.sh --uninstall  # Remove all policies
 ```
 
-4. Restart Brave and visit `brave://policy` to verify.
+3. Restart Brave and visit `brave://policy` to verify.
 
-### Undo / Restore
+### Undo
 
 ```bash
-./debloat-brave-macos.sh --restore
+sudo ./debloat-brave-macos.sh --restore    # Pick a backup to restore
+sudo ./debloat-brave-macos.sh --uninstall  # Remove all policies directly
 ```
 
 ---
@@ -71,15 +80,19 @@ Set-ExecutionPolicy -Scope Process RemoteSigned
 
 ```powershell
 cd C:\path\to\this\folder
-.\debloat-brave-windows.ps1
+.\debloat-brave-windows.ps1              # Apply debloat
+.\debloat-brave-windows.ps1 -DryRun      # Preview changes only
+.\debloat-brave-windows.ps1 -Restore     # Restore from backup
+.\debloat-brave-windows.ps1 -Uninstall   # Remove all policies
 ```
 
 5. Restart Brave and visit `brave://policy` to verify.
 
-### Undo / Restore
+### Undo
 
 ```powershell
-.\debloat-brave-windows.ps1 -Restore
+.\debloat-brave-windows.ps1 -Restore      # Pick a backup to restore
+.\debloat-brave-windows.ps1 -Uninstall    # Remove all policies directly
 ```
 
 ---
@@ -98,11 +111,12 @@ If you prefer not to use PowerShell, just double-click the `.reg` file.
 
 ### Undo
 
-Open Registry Editor (`regedit`), navigate to:
+Double-click `debloat-brave-windows-undo.reg` to remove all policies.
+
+Or open Registry Editor (`regedit`), navigate to:
 ```
 HKEY_LOCAL_MACHINE\SOFTWARE\Policies\BraveSoftware\Brave
 ```
-
 Delete the value names you want to revert, or change `1` → `0` (and `0` → `1` for `*Enabled` keys).
 
 ---
@@ -110,14 +124,14 @@ Delete the value names you want to revert, or change `1` → `0` (and `0` → `1
 ## How It Works
 
 ### macOS
-Uses the `defaults write` command to set **policy preferences** in `~/Library/Preferences/com.brave.Browser.plist`. 
+Writes managed policy preferences to `/Library/Managed Preferences/com.brave.Browser.plist` using PlistBuddy with correct data types. This is the proper macOS enterprise policy path for Chromium-based browsers.
 
-**⚠️ CRITICAL:** On macOS, Brave policies that are `DWord` (0/1) on Windows **must** be set as **integers** (`-integer`), not booleans (`-bool`). Using the wrong type causes Brave to crash on startup with `EXC_BREAKPOINT`. The script handles this correctly.
+**CRITICAL:** On macOS, Brave boolean policies **must** be written to the managed preferences location with proper types via PlistBuddy. Writing them to the user plist via `defaults write -bool` causes Brave to crash on startup with `EXC_BREAKPOINT`. The script handles this correctly.
 
 ### Windows
 Writes **Group Policy registry values** under `HKLM:\SOFTWARE\Policies\BraveSoftware\Brave`. This is the officially supported method to manage Brave in enterprise environments — it completely disables the targeted features rather than just hiding them.
 
-> ⚠️ **Note:** After applying these policies, you may see "Your browser is managed by your organization" in Brave's settings or menu. This is normal and expected — it simply means policy values are active.
+> **Note:** After applying these policies, you may see "Your browser is managed by your organization" in Brave's settings or menu. This is normal and expected — it simply means policy values are active.
 
 ---
 
@@ -127,7 +141,7 @@ Both the macOS and PowerShell scripts **automatically back up** your existing se
 - **macOS**: Backups saved to `~/.brave-debloat-backups/<timestamp>/`
 - **Windows**: Backups saved to `%USERPROFILE%\.brave-debloat-backups\<timestamp>\`
 
-You can restore from these backups using the `--restore` (macOS) or `-Restore` (Windows) flags.
+You can restore from these backups using the `--restore` (macOS) or `-Restore` (Windows) flags, or remove all policies directly with `--uninstall` / `-Uninstall`.
 
 ---
 

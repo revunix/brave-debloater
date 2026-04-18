@@ -2,36 +2,44 @@
 <#
 .SYNOPSIS
     Brave Browser Debloater for Windows
-    Disables all non-core Brave features to mimic Brave Origin
+    Disables non-core Brave features to mimic Brave Origin
 
 .DESCRIPTION
     This script applies Group Policy registry entries to disable:
-      - Leo AI Chat
       - Brave News
       - Brave Rewards & Ads
+      - Brave Wallet & Web3
       - Speedreader
-      - Telemetry (P3A, crash logs, daily usage ping)
+      - Telemetry (P3A, daily usage ping, metrics)
       - Brave Talk
       - Tor private windows
       - Brave VPN
-      - Brave Wallet & Web3
       - Wayback Machine integration
       - Web Discovery Project
+
+    WARNING: Some policies cause Brave v147+ to crash even on Windows:
+      - BraveAIChatEnabled (Leo AI)  - Toggle via brave://settings/leo instead
+      - SyncDisabled                  - Breaks browser state restoration
+      - PromotionsEnabled, BackgroundModeEnabled, BrowserSignin - Not in
+        Brave Origin spec; may cause instability
 
     You must run this script as Administrator.
 
 .USAGE
-    Right-click PowerShell → Run as Administrator
+    Right-click PowerShell -> Run as Administrator
     Set-ExecutionPolicy -Scope Process RemoteSigned
-    .\debloat-brave-windows.ps1
-
-    To restore:
-    .\debloat-brave-windows.ps1 -Restore
+    .\debloat-brave-windows.ps1                # Apply debloat
+    .\debloat-brave-windows.ps1 -DryRun       # Preview what would change
+    .\debloat-brave-windows.ps1 -Restore      # Restore from a previous backup
+    .\debloat-brave-windows.ps1 -Uninstall    # Remove all managed policies
+    .\debloat-brave-windows.ps1 -Help          # Show help
 #>
 
 [CmdletBinding()]
 param(
     [switch]$Restore,
+    [switch]$DryRun,
+    [switch]$Uninstall,
     [switch]$Help
 )
 
@@ -43,34 +51,37 @@ $BackupDir = Join-Path $env:USERPROFILE ".brave-debloat-backups"
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
 # Policy definitions: Name -> @{ Value = ...; Type = ... }
-# For *Disabled keys: 1 = disabled
-# For *Enabled keys: 0 = disabled
-$Policies = @{
+# *Disabled keys: 1 = disabled
+# *Enabled keys:  0 = disabled
+#
+# NOTE: Policies removed because they crash Brave v147+ on macOS and may
+# cause issues on Windows too (or are not part of the Brave Origin spec):
+#   BraveAIChatEnabled          - Use brave://settings/leo to disable instead
+#   SyncDisabled                - Breaks browser state restoration
+#   PromotionsEnabled           - Not in Brave Origin spec
+#   BackgroundModeEnabled       - Not in Brave Origin spec
+#   BrowserSignin               - Not in Brave Origin spec
+$Policies = [ordered]@{
     BraveRewardsDisabled        = @{ Value = 1;  Type = "DWord" }
     BraveWalletDisabled         = @{ Value = 1;  Type = "DWord" }
     BraveVPNDisabled            = @{ Value = 1;  Type = "DWord" }
-    BraveAIChatEnabled          = @{ Value = 0;  Type = "DWord" }
     BraveNewsDisabled           = @{ Value = 1;  Type = "DWord" }
     BraveTalkDisabled           = @{ Value = 1;  Type = "DWord" }
     TorDisabled                 = @{ Value = 1;  Type = "DWord" }
-    SyncDisabled                = @{ Value = 1;  Type = "DWord" }
-    BraveSpeedreaderEnabled     = @{ Value = 0;  Type = "DWord" }
     BraveWaybackMachineEnabled  = @{ Value = 0;  Type = "DWord" }
     BraveP3AEnabled             = @{ Value = 0;  Type = "DWord" }
     BraveStatsPingEnabled       = @{ Value = 0;  Type = "DWord" }
     BraveWebDiscoveryEnabled    = @{ Value = 0;  Type = "DWord" }
+    BraveSpeedreaderEnabled     = @{ Value = 0;  Type = "DWord" }
     MetricsReportingEnabled     = @{ Value = 0;  Type = "DWord" }
-    PromotionsEnabled           = @{ Value = 0;  Type = "DWord" }
-    BackgroundModeEnabled       = @{ Value = 0;  Type = "DWord" }
-    BrowserSignin               = @{ Value = 0;  Type = "DWord" }
 }
 
 function Write-Header {
     Write-Host ""
-    Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║          Brave Browser Debloater for Windows                 ║" -ForegroundColor Cyan
-    Write-Host "║     Disables bloat to mimic Brave Origin experience          ║" -ForegroundColor Cyan
-    Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "  ===============================================================" -ForegroundColor Cyan
+    Write-Host "           Brave Browser Debloater for Windows" -ForegroundColor Cyan
+    Write-Host "       Disables bloat to mimic Brave Origin experience" -ForegroundColor Cyan
+    Write-Host "  ===============================================================" -ForegroundColor Cyan
     Write-Host ""
 }
 
@@ -80,133 +91,169 @@ function Test-Admin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-BraveInstalled {
+    $paths = @(
+        "${env:ProgramFiles}\BraveSoftware\Brave-Browser\Application\brave.exe",
+        "${env:ProgramFiles(x86)}\BraveSoftware\Brave-Browser\Application\brave.exe",
+        "${env:LOCALAPPDATA}\BraveSoftware\Brave-Browser\Application\brave.exe"
+    )
+    foreach ($p in $paths) {
+        if (Test-Path $p) { return $true }
+    }
+    # Also check via registry for uninstall entry
+    $uninstall = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -like "Brave Browser*" }
+    return ($null -ne $uninstall)
+}
+
 function Test-BraveRunning {
     $proc = Get-Process -Name "brave" -ErrorAction SilentlyContinue
     return ($null -ne $proc)
 }
 
 function Backup-Registry {
-    param([string]$Path)
-    
-    if (-not (Test-Path $Path)) {
+    if (-not (Test-Path $RegPath)) {
         Write-Host "   No existing policies to backup." -ForegroundColor DarkGray
-        return $null
+        return
     }
-    
+
     $backupPath = Join-Path $BackupDir $Timestamp
     New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
-    
+
     $regFile = Join-Path $backupPath "brave-policies-backup.reg"
-    
-    # Export existing registry key
     $cmd = "reg.exe export `"HKLM\SOFTWARE\Policies\BraveSoftware\Brave`" `"$regFile`" /y 2>&1"
     $output = Invoke-Expression $cmd
-    
+
     if (Test-Path $regFile) {
-        Write-Host "   ✓ Backed up existing policies to: $regFile" -ForegroundColor Green
-        return $regFile
+        Write-Host "   [OK] Backed up existing policies to: $regFile" -ForegroundColor Green
     } else {
-        Write-Host "   ⚠ Could not export registry backup. Proceeding anyway..." -ForegroundColor Yellow
-        return $null
+        Write-Host "   [!] Could not export registry backup. Proceeding anyway..." -ForegroundColor Yellow
     }
 }
 
 function Apply-Policies {
-    Write-Host "Applying Brave debloat policies to registry..." -ForegroundColor Cyan
+    param([switch]$DryRun)
+
+    if ($DryRun) {
+        Write-Host "  [DRY RUN] The following policies would be applied:" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "   Target: $RegPath" -ForegroundColor DarkGray
+        Write-Host ""
+        foreach ($policy in $Policies.GetEnumerator()) {
+            $name = $policy.Key
+            $value = $policy.Value.Value
+            $type = $policy.Value.Type
+            Write-Host "   Would set: $name = $value ($type)" -ForegroundColor DarkGray
+        }
+        Write-Host ""
+        return
+    }
+
+    Write-Host "Applying Brave debloat policies..." -ForegroundColor Cyan
     Write-Host ""
-    
-    # Create/ensure registry path exists
+
     if (-not (Test-Path $RegPath)) {
         New-Item -Path $RegPath -Force | Out-Null
     }
-    
-    foreach ($policy in $Policies.GetEnumerator() | Sort-Object Name) {
+
+    foreach ($policy in $Policies.GetEnumerator()) {
         $name = $policy.Key
         $value = $policy.Value.Value
         $type = $policy.Value.Type
-        
+
         Set-ItemProperty -Path $RegPath -Name $name -Value $value -Type $type -Force
-        Write-Host "   ✓ Set $name = $value" -ForegroundColor Green
+        Write-Host "   [OK] Set $name = $value" -ForegroundColor Green
     }
-    
+
     Write-Host ""
-    Write-Host "✓ All policies applied successfully." -ForegroundColor Green
+    Write-Host "[OK] All policies applied successfully." -ForegroundColor Green
 }
 
 function Show-Summary {
     Write-Host ""
-    Write-Host "══════════════════════════════════════════════════════════════" -ForegroundColor Green
-    Write-Host "  Debloating complete!" -ForegroundColor Green
-    Write-Host "══════════════════════════════════════════════════════════════" -ForegroundColor Green
+    Write-Host "  ===============================================================" -ForegroundColor Green
+    Write-Host "    Debloating complete!" -ForegroundColor Green
+    Write-Host "  ===============================================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "The following features have been DISABLED:"
-    Write-Host "  • Leo AI Chat"
-    Write-Host "  • Brave News"
-    Write-Host "  • Brave Rewards & Ads"
-    Write-Host "  • Speedreader"
-    Write-Host "  • Telemetry (P3A, crash logs, daily usage ping)"
-    Write-Host "  • Brave Talk"
-    Write-Host "  • Tor private windows"
-    Write-Host "  • Brave VPN"
-    Write-Host "  • Brave Wallet & Web3"
-    Write-Host "  • Wayback Machine integration"
-    Write-Host "  • Web Discovery Project"
+    Write-Host "  * Brave News"
+    Write-Host "  * Brave Rewards & Ads"
+    Write-Host "  * Brave Wallet & Web3"
+    Write-Host "  * Speedreader"
+    Write-Host "  * Telemetry (P3A, daily usage ping, metrics)"
+    Write-Host "  * Brave Talk"
+    Write-Host "  * Tor private windows"
+    Write-Host "  * Brave VPN"
+    Write-Host "  * Wayback Machine integration"
+    Write-Host "  * Web Discovery Project"
     Write-Host ""
-    Write-Host "IMPORTANT: Please restart Brave Browser for all changes to take effect." -ForegroundColor Yellow
+    Write-Host "SKIPPED (crash-causing on some versions):" -ForegroundColor Yellow
+    Write-Host "  * Leo AI Chat (policy can crash Brave)" -ForegroundColor Yellow
+    Write-Host "  * Sync (policy breaks state restoration)" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "You can verify policies are active by visiting:"
-    Write-Host "  brave://policy"
+    Write-Host "TIP: To disable Leo AI, go to brave://settings/leo" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "To undo these changes, run:" -ForegroundColor Cyan
+    Write-Host "IMPORTANT: Please restart Brave Browser for changes to take effect." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "You can verify policies at: brave://policy"
+    Write-Host ""
+    Write-Host "To undo these changes:" -ForegroundColor Cyan
     Write-Host "  .\debloat-brave-windows.ps1 -Restore" -ForegroundColor Cyan
+    Write-Host "  .\debloat-brave-windows.ps1 -Uninstall" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "NOTE: You may see 'Managed by your organization' in Brave's menu." -ForegroundColor DarkGray
+    Write-Host "      This is normal when policy values are active." -ForegroundColor DarkGray
     Write-Host ""
 }
 
 function Restore-Backup {
     Write-Host ""
     Write-Host "Available backups:" -ForegroundColor Cyan
-    
+
     if (-not (Test-Path $BackupDir)) {
         Write-Host "   No backup directory found." -ForegroundColor Red
         return
     }
-    
+
     $backups = Get-ChildItem -Path $BackupDir -Directory | Sort-Object Name
-    
+
     if ($backups.Count -eq 0) {
         Write-Host "   No backups found." -ForegroundColor Red
         return
     }
-    
+
     $index = 1
     foreach ($b in $backups) {
         Write-Host "  $index) $($b.Name)"
         $index++
     }
     Write-Host ""
-    
+
     $choice = Read-Host "Select a backup to restore (1-$($backups.Count))"
-    
+
     if ($choice -match '^\d+$') {
         $num = [int]$choice
         if ($num -ge 1 -and $num -le $backups.Count) {
             $selected = $backups[$num - 1]
             $regFile = Join-Path $selected.FullName "brave-policies-backup.reg"
-            
+
             if (Test-Path $regFile) {
                 Write-Host ""
                 Write-Host "Restoring from: $($selected.Name)" -ForegroundColor Yellow
                 $confirm = Read-Host "Are you sure? [y/N]"
                 if ($confirm -match '^[Yy]$') {
-                    $cmd = "reg.exe import `"$regFile`" 2>&1"
-                    $output = Invoke-Expression $cmd
-                    Write-Host "   ✓ Registry restored." -ForegroundColor Green
+                    reg.exe import "$regFile" 2>&1 | Out-Null
+                    Write-Host "   [OK] Registry restored." -ForegroundColor Green
                     Write-Host "   Please restart Brave Browser." -ForegroundColor Cyan
                 } else {
-                    Write-Host "   Restore cancelled." -ForegroundColor Gray
+                    Write-Host "   Restore cancelled." -ForegroundColor DarkGray
                 }
             } else {
-                Write-Host "   Backup file not found inside folder." -ForegroundColor Red
+                Write-Host "   No backup file found. Removing current policies instead..." -ForegroundColor Yellow
+                $confirm = Read-Host "Remove all policies? [y/N]"
+                if ($confirm -match '^[Yy]$') {
+                    Remove-PoliciesAll
+                }
             }
         } else {
             Write-Host "   Invalid selection." -ForegroundColor Red
@@ -216,23 +263,58 @@ function Restore-Backup {
     }
 }
 
+function Remove-PoliciesAll {
+    if (Test-Path $RegPath) {
+        Remove-Item -Path $RegPath -Recurse -Force
+        Write-Host "   [OK] Removed all managed policies." -ForegroundColor Green
+    } else {
+        Write-Host "   No managed policies found. Nothing to remove." -ForegroundColor DarkGray
+    }
+    Write-Host ""
+    Write-Host "   All policies removed. Please restart Brave Browser." -ForegroundColor Cyan
+}
+
+function Uninstall-Policies {
+    Write-Host ""
+    if (-not (Test-Path $RegPath)) {
+        Write-Host "No managed policies found. Nothing to remove." -ForegroundColor DarkGray
+        return
+    }
+    Write-Host "WARNING: This will remove ALL managed policies from Brave." -ForegroundColor Yellow
+    $confirm = Read-Host "Are you sure? [y/N]"
+    if ($confirm -match '^[Yy]$') {
+        Remove-PoliciesAll
+    } else {
+        Write-Host "Uninstall cancelled." -ForegroundColor DarkGray
+    }
+}
+
 function Show-Help {
-    @"
+    Write-Host @"
 Brave Browser Debloater for Windows
 
 Usage:
-  .\debloat-brave-windows.ps1          Apply debloat policies
-  .\debloat-brave-windows.ps1 -Restore Restore from a previous backup
-  .\debloat-brave-windows.ps1 -Help    Show this help message
+  .\debloat-brave-windows.ps1              Apply debloat policies
+  .\debloat-brave-windows.ps1 -DryRun     Preview what would change
+  .\debloat-brave-windows.ps1 -Restore    Restore from a previous backup
+  .\debloat-brave-windows.ps1 -Uninstall  Remove all managed policies
+  .\debloat-brave-windows.ps1 -Help       Show this help message
 
-This script disables Brave's non-core features by writing Group Policy registry
-entries under HKLM:\SOFTWARE\Policies\BraveSoftware\Brave.
+This script disables Brave's non-core features by writing Group Policy
+registry entries under HKLM:\SOFTWARE\Policies\BraveSoftware\Brave.
 
 You must run PowerShell as Administrator to use this script.
 
+Features disabled:
+  Brave News, Rewards, Wallet/Web3, Speedreader, Telemetry, Talk, Tor,
+  VPN, Wayback Machine, Web Discovery Project
+
+Features NOT disabled (caused crashes in some versions):
+  Leo AI Chat, Sync
+
 Quick start:
   1. Close Brave completely
-  2. Right-click PowerShell → Run as Administrator
+  2. Right-click PowerShell -> Run as Administrator
   3. cd to the folder containing this script
   4. Set-ExecutionPolicy -Scope Process RemoteSigned
   5. .\debloat-brave-windows.ps1
@@ -240,7 +322,7 @@ Quick start:
 "@
 }
 
-# ─── Main Entry ───
+# --- Main Entry ---
 if ($Help) {
     Show-Help
     exit 0
@@ -259,22 +341,41 @@ if ($Restore) {
     exit 0
 }
 
+if ($Uninstall) {
+    Uninstall-Policies
+    exit 0
+}
+
+if (-not (Test-BraveInstalled)) {
+    Write-Host "WARNING: Brave Browser does not appear to be installed." -ForegroundColor Yellow
+    Write-Host "         Policies will still be applied but may have no effect." -ForegroundColor Yellow
+    Write-Host ""
+} else {
+    Write-Host "[OK] Brave Browser is installed." -ForegroundColor Green
+}
+
 if (Test-BraveRunning) {
     Write-Host "WARNING: Brave Browser appears to be running." -ForegroundColor Yellow
     Write-Host "Please close Brave completely before continuing." -ForegroundColor Yellow
     Write-Host ""
     $continue = Read-Host "Press [Enter] to continue after closing Brave, or type 'exit' to quit"
     if ($continue -eq "exit") { exit 0 }
-    
+
     if (Test-BraveRunning) {
         Write-Host "Brave is still running. Exiting." -ForegroundColor Red
         exit 1
     }
 }
+Write-Host "[OK] Brave Browser is not running." -ForegroundColor Green
+
+if ($DryRun) {
+    Apply-Policies -DryRun
+    exit 0
+}
 
 Write-Host "Creating backup of existing policies..." -ForegroundColor Cyan
 New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
-$backupFile = Backup-Registry -Path $RegPath
+Backup-Registry
 
 Apply-Policies
 Show-Summary

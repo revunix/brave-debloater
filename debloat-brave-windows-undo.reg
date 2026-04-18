@@ -1,0 +1,15 @@
+Windows Registry Editor Version 5.00
+
+; Brave Browser Debloater - UNDO
+; Removes ALL managed policies set by debloat-brave-windows.reg
+;
+; This deletes the entire Brave policy key, which removes every
+; policy value under it in one step.
+;
+; Usage:
+;   1. Close Brave completely
+;   2. Double-click this .reg file
+;   3. Click "Yes" on confirmation prompts
+;   4. Restart Brave and visit brave://policy to verify
+
+[-HKEY_LOCAL_MACHINE\SOFTWARE\Policies\BraveSoftware\Brave]
