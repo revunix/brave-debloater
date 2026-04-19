@@ -2,6 +2,14 @@
 
 These scripts disable non-core Brave Browser features to replicate the **Brave Origin** debloated experience — without paying for it.
 
+## Disclaimer
+
+**Brave**, **Brave Browser**, **Brave Origin**, **Brave Search**, **Brave Shields**, **Brave Rewards**, **Brave Talk**, **Brave VPN**, **Brave Wallet**, **Brave News**, **Leo**, **Speedreader**, and all related product names, logos, and trademarks are the property of **Brave Software, Inc.** and are used here for identification purposes only.
+
+This project is **not affiliated with, endorsed by, or sponsored by** Brave Software, Inc. in any way.
+
+These scripts are independent community tools that configure existing, officially documented Group Policy settings. They do not modify, reverse-engineer, or redistribute any Brave software.
+
 ## What Gets Disabled
 
 | Feature | Policy Key |
@@ -150,3 +158,4 @@ You can restore from these backups using the `--restore` (macOS) or `-Restore` (
 - [Brave Support — What is Brave Origin?](https://support.brave.app/hc/en-us/articles/38561489788173-What-is-Brave-Origin)
 - [Brave Support — Group Policy](https://support.brave.app/hc/en-us/articles/360039248271-Group-Policy)
 - [Brave Group Policy Templates](https://support.brave.com/hc/en-us/articles/360039248271)
+
