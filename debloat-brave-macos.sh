@@ -37,8 +37,22 @@ CHANNEL="stable"
 _args=("$@")
 for (( _i=0; _i<${#_args[@]}; _i++ )); do
     case "${_args[$_i]}" in
-        --channel=*) CHANNEL="${_args[$_i]#*=}" ;;
-        --channel)   CHANNEL="${_args[$(( _i+1 ))]:-stable}" ;;
+        --channel=*)
+            CHANNEL="${_args[$_i]#*=}"
+            if [[ -z "$CHANNEL" ]]; then
+                echo "Error: --channel requires a value (stable|beta|nightly). See --help."
+                exit 1
+            fi
+            ;;
+        --channel)
+            if (( _i+1 < ${#_args[@]} )) && [[ "${_args[$(( _i+1 ))]}" != -* ]]; then
+                CHANNEL="${_args[$(( _i+1 ))]}"
+                (( _i++ ))
+            else
+                echo "Error: --channel requires a value (stable|beta|nightly). See --help."
+                exit 1
+            fi
+            ;;
     esac
 done
 
@@ -103,11 +117,18 @@ declare -a POLICIES=(
 )
 
 print_header() {
+    local line1="Brave Browser Debloater for macOS (${BRAVE_APP_NAME})"
+    local line2="Disables bloat to mimic Brave Origin experience"
+    local max_len=$(( ${#line1} > ${#line2} ? ${#line1} : ${#line2} ))
+    local inner=$(( max_len + 4 ))
+    local border
+    printf -v border '%*s' "$inner" ''
+    border="${border// /═}"
     echo -e "${CYAN}"
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    printf "║     Brave Browser Debloater for macOS (%-20s) ║\n" "${BRAVE_APP_NAME}"
-    echo "║     Disables bloat to mimic Brave Origin experience          ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo "╔${border}╗"
+    printf "║  %-$(( inner - 4 ))s  ║\n" "${line1}"
+    printf "║  %-$(( inner - 4 ))s  ║\n" "${line2}"
+    echo "╚${border}╝"
     echo -e "${NC}"
 }
 
@@ -293,10 +314,15 @@ restore_backup() {
     fi
     local backups=()
     while IFS= read -r -d '' dir; do
-        backups+=("$(basename "$dir")")
+        local bname
+        bname="$(basename "$dir")"
+        # Only include backups that contain files for the current channel
+        if compgen -G "${BACKUP_DIR}/${bname}/*${BROWSER_BUNDLE_ID}*" > /dev/null 2>&1; then
+            backups+=("${bname}")
+        fi
     done < <(find "${BACKUP_DIR}" -maxdepth 1 -mindepth 1 -type d -print0 | sort -z)
     if [[ ${#backups[@]} -eq 0 ]]; then
-        print_error "No backups found."
+        print_error "No backups found for ${BRAVE_APP_NAME}."
         exit 1
     fi
     echo ""
@@ -325,10 +351,11 @@ restore_backup() {
             print_success "Restored managed plist preferences."
             restored=true
         else
-            # If no managed backup exists, remove managed plist to clear policies
+            # Backup was made for this channel but no managed plist existed at backup time —
+            # remove the current managed plist to restore that "no policies" state.
             if [[ -f "${MANAGED_PLIST}" ]]; then
                 rm -f "${MANAGED_PLIST}"
-                print_success "Removed managed policies."
+                print_success "Removed managed policies (none existed at backup time)."
                 restored=true
             fi
         fi
